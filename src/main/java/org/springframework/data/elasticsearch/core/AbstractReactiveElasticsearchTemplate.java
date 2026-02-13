@@ -225,68 +225,9 @@ abstract public class AbstractReactiveElasticsearchTemplate
 		Assert.notNull(index, "index must not be null");
 		Assert.isTrue(bulkSize > 0, "bulkSize must be greater than 0");
 
-		return Flux.defer(() -> {
-			Sinks.Many<T> sink = Sinks.many().unicast().onBackpressureBuffer();
-			// noinspection ReactiveStreamsSubscriberImplementation
-			entities
-					.bufferTimeout(bulkSize, Duration.ofMillis(200), true)
-					.subscribe(new Subscriber<>() {
-						@Nullable private Subscription subscription = null;
-						private final AtomicBoolean upstreamComplete = new AtomicBoolean(false);
-						private final AtomicBoolean onNextHasBeenCalled = new AtomicBoolean(false);
-
-						@Override
-						public void onSubscribe(Subscription subscription) {
-							this.subscription = subscription;
-							subscription.request(1);
-						}
-
-						@Override
-						public void onNext(List<T> entityList) {
-							onNextHasBeenCalled.set(true);
-							saveAll(entityList, index)
-									.map(entity -> {
-										sink.tryEmitNext(entity);
-										return entity;
-									})
-									.doOnComplete(() -> {
-										if (!upstreamComplete.get()) {
-											if (subscription == null) {
-												throw new IllegalStateException("no subscription");
-											}
-											subscription.request(1);
-										} else {
-											sink.tryEmitComplete();
-										}
-									})
-									.subscribe(v -> {
-									}, error -> {
-										if (subscription != null) {
-											subscription.cancel();
-										}
-										sink.tryEmitError(error);
-									});
-						}
-
-						@Override
-						public void onError(Throwable throwable) {
-							if (subscription != null) {
-								subscription.cancel();
-							}
-							sink.tryEmitError(throwable);
-						}
-
-						@Override
-						public void onComplete() {
-							upstreamComplete.set(true);
-							if (!onNextHasBeenCalled.get()) {
-								// this happens when an empty flux is saved
-								sink.tryEmitComplete();
-							}
-						}
-					});
-			return sink.asFlux();
-		});
+		return entities
+				.bufferTimeout(bulkSize, Duration.ofMillis(200), true)
+				.concatMapDelayError(batch -> saveAll(batch, index));
 
 	}
 
